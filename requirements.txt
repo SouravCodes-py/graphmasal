@@ -14,3 +14,7 @@ pandas
 pytest
 python-docx
 python-pptx
+groq
+google-generativeai
+litellm
+pgvector
