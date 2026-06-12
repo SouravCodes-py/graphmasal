@@ -12,3 +12,5 @@ langchain-openai
 numpy
 pandas
 pytest
+python-docx
+python-pptx

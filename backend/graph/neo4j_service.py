@@ -4,10 +4,8 @@ from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 from neo4j import GraphDatabase, exceptions
 
-# Load environment variables
 load_dotenv()
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -15,13 +13,10 @@ class Neo4jService:
     """Service class for interacting with the Neo4j database."""
 
     def __init__(self, uri: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None):
-        """
-        Initialize the Neo4j driver. Uses environment variables if arguments are not provided.
-        """
         self.uri = uri or os.getenv("NEO4J_URI", "neo4j://localhost:7687")
         self.user = user or os.getenv("NEO4J_USERNAME", "neo4j")
         self.password = password or os.getenv("NEO4J_PASSWORD", "password")
-        
+
         try:
             self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
             self.driver.verify_connectivity()
@@ -31,15 +26,11 @@ class Neo4jService:
             raise
 
     def close(self):
-        """Close the Neo4j driver connection."""
         if self.driver:
             self.driver.close()
             logger.info("Neo4j connection closed.")
 
     def create_concept(self, concept_id: str, name: str, description: str, mastery_score: float = 0.0) -> Optional[Dict[str, Any]]:
-        """
-        Create a new Concept node.
-        """
         query = """
         MERGE (c:Concept {id: $id})
         SET c.name = $name,
@@ -53,7 +44,6 @@ class Neo4jService:
             "description": description,
             "mastery_score": mastery_score
         }
-        
         try:
             with self.driver.session() as session:
                 result = session.run(query, parameters)
@@ -66,10 +56,6 @@ class Neo4jService:
             raise
 
     def create_prerequisite(self, prerequisite_id: str, target_id: str, weight: float = 1.0) -> bool:
-        """
-        Create a PREREQUISITE_OF relationship between two Concept nodes.
-        (prerequisite_id) -[:PREREQUISITE_OF {weight: weight}]-> (target_id)
-        """
         query = """
         MATCH (p:Concept {id: $prerequisite_id})
         MATCH (t:Concept {id: $target_id})
@@ -82,7 +68,6 @@ class Neo4jService:
             "target_id": target_id,
             "weight": weight
         }
-
         try:
             with self.driver.session() as session:
                 result = session.run(query, parameters)
@@ -96,9 +81,6 @@ class Neo4jService:
             raise
 
     def get_concept(self, concept_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Retrieve a Concept node by its ID.
-        """
         query = """
         MATCH (c:Concept {id: $id})
         RETURN c
@@ -115,10 +97,6 @@ class Neo4jService:
             raise
 
     def get_prerequisites(self, concept_id: str) -> List[Dict[str, Any]]:
-        """
-        Get all concepts that are prerequisites of the given concept.
-        (p)-[:PREREQUISITE_OF]->(c:Concept {id: concept_id})
-        """
         query = """
         MATCH (p:Concept)-[r:PREREQUISITE_OF]->(c:Concept {id: $id})
         RETURN p, r.weight AS weight
@@ -137,12 +115,7 @@ class Neo4jService:
             raise
 
     def update_mastery_score(self, concept_id: str, new_score: float) -> Optional[Dict[str, Any]]:
-        """
-        Update the mastery_score of a Concept node.
-        """
-        # Ensure score is between 0.0 and 1.0
         new_score = max(0.0, min(1.0, new_score))
-        
         query = """
         MATCH (c:Concept {id: $id})
         SET c.mastery_score = $score
@@ -161,15 +134,105 @@ class Neo4jService:
             logger.error(f"Error updating mastery score for {concept_id}: {e}")
             raise
 
+    # ── Graph population ────────────────────────────────────────────────────
+
+    def write_concept_node(self, name: str, definition: str, subject: str = "") -> bool:
+        """
+        Merge a Concept node by name. Safe to call multiple times — will not
+        create duplicates. Used by the Knowledge Extraction Agent.
+        """
+        query = """
+        MERGE (c:Concept {name: $name})
+        SET c.definition = $definition,
+            c.subject = $subject,
+            c.created_at = datetime()
+        RETURN c
+        """
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, name=name, definition=definition, subject=subject)
+                return result.single() is not None
+        except Exception as e:
+            logger.error(f"Error writing concept node '{name}': {e}")
+            raise
+
+    def write_prerequisite_edge(self, source: str, target: str, weight: float = 1.0) -> bool:
+        """
+        Merge a PREREQUISITE_OF edge between two concepts identified by name.
+        source must be understood before target.
+        """
+        query = """
+        MATCH (a:Concept {name: $source})
+        MATCH (b:Concept {name: $target})
+        MERGE (a)-[r:PREREQUISITE_OF]->(b)
+        SET r.weight = $weight
+        RETURN r
+        """
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, source=source, target=target, weight=weight)
+                if result.single():
+                    return True
+                else:
+                    logger.warning(f"Could not create edge '{source}' -> '{target}'. One or both nodes may not exist.")
+                    return False
+        except Exception as e:
+            logger.error(f"Error writing prerequisite edge '{source}' -> '{target}': {e}")
+            raise
+
+    def populate_graph(self, concepts_data: dict, relationships_data: dict, subject: str = "") -> Dict[str, int]:
+        """
+        Write all concepts and relationships from extraction output to Neo4j.
+        Returns a summary of how many nodes and edges were written.
+        """
+        nodes_written = 0
+        edges_written = 0
+        edges_failed = 0
+
+        logger.info(f"Writing {len(concepts_data['concepts'])} concept nodes...")
+        for concept in concepts_data["concepts"]:
+            try:
+                self.write_concept_node(
+                    name=concept["name"],
+                    definition=concept.get("definition", ""),
+                    subject=subject
+                )
+                nodes_written += 1
+            except Exception as e:
+                logger.error(f"Failed to write node '{concept['name']}': {e}")
+
+        logger.info(f"Writing {len(relationships_data['relationships'])} prerequisite edges...")
+        for rel in relationships_data["relationships"]:
+            try:
+                success = self.write_prerequisite_edge(
+                    source=rel["source"],
+                    target=rel["target"],
+                    weight=rel.get("confidence", 1.0)
+                )
+                if success:
+                    edges_written += 1
+                else:
+                    edges_failed += 1
+            except Exception as e:
+                logger.error(f"Failed to write edge '{rel['source']}' -> '{rel['target']}': {e}")
+                edges_failed += 1
+
+        summary = {
+            "nodes_written": nodes_written,
+            "edges_written": edges_written,
+            "edges_failed": edges_failed
+        }
+        logger.info(f"Graph population complete: {summary}")
+        return summary
+
 
 # Example Usage
 if __name__ == "__main__":
-    # Ensure you have your .env file set up with NEO4J_URI, NEO4J_USERNAME, and NEO4J_PASSWORD
     print("--- Neo4j Service Example ---")
-    
+
     try:
         service = Neo4jService()
-        
+
         # 1. Create Concepts
         print("\n1. Creating Concepts...")
         concept1 = service.create_concept(
@@ -198,8 +261,8 @@ if __name__ == "__main__":
 
         # 2. Create Prerequisites
         print("\n2. Creating Prerequisites...")
-        service.create_prerequisite("c001", "c002", weight=0.9) # Functions -> Composite Functions
-        service.create_prerequisite("c002", "c003", weight=1.0) # Composite Functions -> Chain Rule
+        service.create_prerequisite("c001", "c002", weight=0.9)
+        service.create_prerequisite("c002", "c003", weight=1.0)
         print("Prerequisites established.")
 
         # 3. Get Concept
