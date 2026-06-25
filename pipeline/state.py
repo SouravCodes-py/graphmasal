@@ -29,6 +29,8 @@ class StudentState(TypedDict):
     # --- Mastery snapshot ---
     mastery_scores: Optional[dict]        # { concept_name: float }
     mastery_threshold: float              # default 0.5
+    interaction_score: Optional[float]    # 0–1 score from latest quiz/interaction
+    score_delta: Optional[float]          # how much mastery changed (for Memory Agent)
 
     # --- Memory ---
     memory_context: Optional[list[str]]   # top-3 past session summaries, fetched on demand
