@@ -1,10 +1,14 @@
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Optional
 
 class Concept(BaseModel):
     id: str = Field(description="Unique identifier for the concept, e.g., 'c001', 'c002'")
     name: str = Field(description="Name of the educational concept")
     description: str = Field(description="Concise explanation of the concept")
+    embedding: Optional[List[float]] = Field(
+        default=None,
+        description="Semantic embedding vector for the concept name",
+    )
 
 class ConceptList(BaseModel):
     concepts: List[Concept]

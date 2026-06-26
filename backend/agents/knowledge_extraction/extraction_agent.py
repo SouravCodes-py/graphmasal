@@ -9,6 +9,8 @@ from .utils import setup_logger
 
 logger = setup_logger(__name__)
 
+EMBEDDING_MODEL = "text-embedding-3-small"
+
 class KnowledgeExtractionAgent:
     """
     Agent responsible for extracting concepts and prerequisite relationships
@@ -38,6 +40,29 @@ class KnowledgeExtractionAgent:
         parsed_response = response.choices[0].message.parsed
         concepts = parsed_response.concepts if parsed_response else []
         logger.info(f"Extracted {len(concepts)} concepts.")
+        return concepts
+
+    def embed_concepts(self, concepts: List[Concept]) -> List[Concept]:
+        """
+        Generate a semantic embedding for each concept's name using
+        OpenAI's text-embedding-3-small model. Embeds all names in a
+        single batched API call for efficiency.
+        """
+        if not concepts:
+            return concepts
+
+        names = [c.name for c in concepts]
+        logger.info(f"Embedding {len(names)} concept names with {EMBEDDING_MODEL}...")
+
+        response = self.client.embeddings.create(
+            model=EMBEDDING_MODEL,
+            input=names,
+        )
+
+        for concept, data in zip(concepts, response.data):
+            concept.embedding = data.embedding
+
+        logger.info(f"Successfully embedded {len(concepts)} concepts (dim={len(response.data[0].embedding)}).")
         return concepts
 
     def extract_relationships(self, text: str, concepts: List[Concept]) -> List[Relationship]:
@@ -83,6 +108,9 @@ class KnowledgeExtractionAgent:
         try:
             # Step 1: Extract Concepts
             concepts = self.extract_concepts(text)
+
+            # Step 1b: Embed Concept Names
+            concepts = self.embed_concepts(concepts)
             
             # Step 2: Extract Relationships (only if there are multiple concepts)
             relationships = []
