@@ -7,6 +7,18 @@ Guidelines:
 - Ignore examples, anecdotes, filler content, and specific numerical exercises unless they represent a fundamental concept.
 - Provide a concise, clear description for each extracted concept.
 - Assign a unique ID to each concept (e.g., 'c001', 'c002').
+
+CRITICAL: Return ONLY valid JSON. No markdown, no bullet points, no preamble, no explanation.
+Your entire response must be a single JSON object in this exact format:
+{
+  "concepts": [
+    {
+      "id": "c001",
+      "name": "concept name",
+      "description": "one sentence description"
+    }
+  ]
+}
 """
 
 RELATIONSHIP_EXTRACTION_SYSTEM_PROMPT = """
@@ -20,4 +32,17 @@ Guidelines:
 - Use the provided concept IDs for the 'source' and 'target' fields. The 'source' is the prerequisite concept, and the 'target' is the concept that depends on it.
 - Assign a confidence score between 0.0 (low confidence) and 1.0 (high confidence) for each relationship.
 - Always set 'relationship_type' to 'PREREQUISITE_OF'.
+
+CRITICAL: Return ONLY valid JSON. No markdown, no bullet points, no preamble, no explanation.
+Your entire response must be a single JSON object in this exact format:
+{
+  "relationships": [
+    {
+      "source": "c001",
+      "target": "c002",
+      "relationship_type": "PREREQUISITE_OF",
+      "confidence": 0.95
+    }
+  ]
+}
 """

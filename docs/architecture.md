@@ -20,7 +20,7 @@ Databases:
 - Supabase
 
 LLM:
-- OpenAI GPT-4o
+- Google Gemini & Groq Llama 3.3
 
 Embeddings:
-- OpenAI text-embedding-3-small
+- Google AI Studio gemini-embedding-001 (3072 dims)

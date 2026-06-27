@@ -3,14 +3,12 @@ uvicorn[standard]
 python-dotenv
 neo4j
 supabase
-openai
 anthropic
 pymupdf
 pydantic
 langgraph
 langchain
 langchain-core
-langchain-openai
 numpy
 pandas
 pytest

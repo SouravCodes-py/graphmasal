@@ -1,128 +1,206 @@
-import os
-from typing import List, Dict, Any
-from openai import OpenAI
-from pydantic import ValidationError
+"""
+GraphMASAL · Knowledge Extraction Agent
+========================================
+Extracts concepts and prerequisite relationships from educational text
+using a two-step LLM pipeline powered entirely by Google Gemini.
 
-from .models import Concept, ConceptList, Relationship, RelationshipList, KnowledgeGraph
+Pipeline:
+    1. Extract concepts (Gemini 2.5 Flash → structured JSON)
+    2. Embed concept names (gemini-embedding-001 · batched)
+    3. Extract relationships (Gemini 2.5 Flash → structured JSON)
+
+Environment variables required:
+    GOOGLE_API_KEY
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+from typing import Any, Dict, List
+
+import google.generativeai as genai
+
+from .models import Concept, ConceptList, KnowledgeGraph, Relationship, RelationshipList
 from .prompts import CONCEPT_EXTRACTION_SYSTEM_PROMPT, RELATIONSHIP_EXTRACTION_SYSTEM_PROMPT
 from .utils import setup_logger
 
 logger = setup_logger(__name__)
 
-EMBEDDING_MODEL = "text-embedding-3-small"
+EXTRACTION_MODEL = "gemini-2.5-flash"
+EMBEDDING_MODEL = "models/gemini-embedding-001"
+
+
+def _clean_json(raw: str) -> str:
+    """Strip markdown fences if Gemini wraps output in ```json ... ```."""
+    raw = raw.strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+    return raw.strip()
+
 
 class KnowledgeExtractionAgent:
     """
-    Agent responsible for extracting concepts and prerequisite relationships
-    from educational text using a two-step LLM pipeline.
+    Extracts a knowledge graph (concepts + prerequisite relationships)
+    from raw educational text using Gemini 2.5 Flash.
     """
-    
-    def __init__(self, model_name: str = "gpt-4o"):
+
+    def __init__(self, model_name: str = EXTRACTION_MODEL):
         self.model_name = model_name
-        # Initialize OpenAI client. It reads OPENAI_API_KEY from environment variables automatically.
-        self.client = OpenAI()
-        logger.info(f"Initialized KnowledgeExtractionAgent with model {self.model_name}")
+        api_key = os.environ.get("GOOGLE_API_KEY")
+        if not api_key:
+            raise EnvironmentError("GOOGLE_API_KEY is not set")
+        genai.configure(api_key=api_key)
+        self.model = genai.GenerativeModel(model_name)
+        logger.info("Initialized KnowledgeExtractionAgent with model %s", model_name)
+
+    # ------------------------------------------------------------------
+    # Step 1 — Concept extraction
+    # ------------------------------------------------------------------
 
     def extract_concepts(self, text: str) -> List[Concept]:
-        """
-        Step 1: Extract concepts from the raw text.
-        """
+        """Call Gemini to extract concepts from raw text. Returns a list of Concept objects."""
         logger.info("Starting concept extraction...")
-        response = self.client.beta.chat.completions.parse(
-            model=self.model_name,
-            messages=[
-                {"role": "system", "content": CONCEPT_EXTRACTION_SYSTEM_PROMPT},
-                {"role": "user", "content": f"Extract educational concepts from the following text:\n\n{text}"}
-            ],
-            response_format=ConceptList,
+
+        user_prompt = (
+            f"Extract educational concepts from the following text:\n\n{text}"
         )
-        
-        parsed_response = response.choices[0].message.parsed
-        concepts = parsed_response.concepts if parsed_response else []
-        logger.info(f"Extracted {len(concepts)} concepts.")
+
+        full_prompt = f"{CONCEPT_EXTRACTION_SYSTEM_PROMPT}\n\n{user_prompt}"
+
+        response = self.model.generate_content(
+            full_prompt,
+            generation_config=genai.GenerationConfig(
+                temperature=0.2,
+                max_output_tokens=4096,
+            ),
+        )
+
+        raw = _clean_json(response.text)
+
+        try:
+            data = json.loads(raw)
+            parsed = ConceptList(**data)
+            concepts = parsed.concepts
+        except Exception as e:
+            logger.error("Failed to parse concept extraction response: %s\nRaw: %s", e, raw[:500])
+            concepts = []
+
+        logger.info("Extracted %d concepts.", len(concepts))
         return concepts
 
+    # ------------------------------------------------------------------
+    # Step 2 — Embedding (batched)
+    # ------------------------------------------------------------------
+
     def embed_concepts(self, concepts: List[Concept]) -> List[Concept]:
-        """
-        Generate a semantic embedding for each concept's name using
-        OpenAI's text-embedding-3-small model. Embeds all names in a
-        single batched API call for efficiency.
-        """
+        """Embed all concept names in a single batched call using gemini-embedding-001."""
         if not concepts:
             return concepts
 
         names = [c.name for c in concepts]
-        logger.info(f"Embedding {len(names)} concept names with {EMBEDDING_MODEL}...")
+        logger.info("Embedding %d concept names with %s...", len(names), EMBEDDING_MODEL)
 
-        response = self.client.embeddings.create(
+        result = genai.embed_content(
             model=EMBEDDING_MODEL,
-            input=names,
+            content=names,
+            task_type="SEMANTIC_SIMILARITY",
         )
 
-        for concept, data in zip(concepts, response.data):
-            concept.embedding = data.embedding
+        for concept, embedding_vector in zip(concepts, result["embedding"]):
+            concept.embedding = embedding_vector
 
-        logger.info(f"Successfully embedded {len(concepts)} concepts (dim={len(response.data[0].embedding)}).")
+        dim = len(result["embedding"][0])
+        logger.info("Embedded %d concepts (dim=%d).", len(concepts), dim)
         return concepts
 
+    # ------------------------------------------------------------------
+    # Step 3 — Relationship extraction
+    # ------------------------------------------------------------------
+
     def extract_relationships(self, text: str, concepts: List[Concept]) -> List[Relationship]:
-        """
-        Step 2: Infer prerequisite relationships between the extracted concepts based on the text.
-        """
+        """Call Gemini to infer prerequisite relationships between extracted concepts."""
         logger.info("Starting relationship extraction...")
-        
-        # Format the concepts list for the prompt context
-        concepts_context = "\n".join([f"- ID: {c.id}, Name: {c.name}, Description: {c.description}" for c in concepts])
-        
+
+        concepts_context = "\n".join(
+            f"- ID: {c.id}, Name: {c.name}, Description: {c.description}"
+            for c in concepts
+        )
+
         user_prompt = (
             f"Given the following original text:\n\n{text}\n\n"
             f"And the following extracted concepts:\n\n{concepts_context}\n\n"
             "Identify prerequisite relationships between these concepts based strictly on the text."
         )
 
-        response = self.client.beta.chat.completions.parse(
-            model=self.model_name,
-            messages=[
-                {"role": "system", "content": RELATIONSHIP_EXTRACTION_SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt}
-            ],
-            response_format=RelationshipList,
+        full_prompt = f"{RELATIONSHIP_EXTRACTION_SYSTEM_PROMPT}\n\n{user_prompt}"
+
+        response = self.model.generate_content(
+            full_prompt,
+            generation_config=genai.GenerationConfig(
+                temperature=0.2,
+                max_output_tokens=4096,
+            ),
         )
-        
-        parsed_response = response.choices[0].message.parsed
-        relationships = parsed_response.relationships if parsed_response else []
-        logger.info(f"Extracted {len(relationships)} relationships.")
+
+        raw = _clean_json(response.text)
+
+        try:
+            data = json.loads(raw)
+            parsed = RelationshipList(**data)
+            relationships = parsed.relationships
+        except Exception as e:
+            logger.error("Failed to parse relationship extraction response: %s\nRaw: %s", e, raw[:500])
+            relationships = []
+
+        logger.info("Extracted %d relationships.", len(relationships))
         return relationships
+
+    # ------------------------------------------------------------------
+    # Main pipeline
+    # ------------------------------------------------------------------
 
     def process_text(self, text: str) -> Dict[str, Any]:
         """
-        Main pipeline method:
-        1. Extract concepts
-        2. Extract relationships
-        3. Return as a single structured JSON dictionary.
+        Full extraction pipeline:
+            1. Extract concepts
+            2. Embed concept names
+            3. Extract relationships
+            4. Return as structured dict
+
+        Parameters
+        ----------
+        text : str
+            Raw educational text extracted from a PDF/DOCX/PPTX etc.
+
+        Returns
+        -------
+        dict
+            KnowledgeGraph serialised as a dict:
+            ``{ "concepts": [...], "relationships": [...] }``
         """
         if not text or not text.strip():
             logger.warning("Empty text provided for extraction.")
             return KnowledgeGraph(concepts=[], relationships=[]).model_dump()
-            
+
         try:
-            # Step 1: Extract Concepts
+            # Step 1 — extract concepts
             concepts = self.extract_concepts(text)
 
-            # Step 1b: Embed Concept Names
+            # Step 2 — embed concept names
             concepts = self.embed_concepts(concepts)
-            
-            # Step 2: Extract Relationships (only if there are multiple concepts)
+
+            # Step 3 — extract relationships
             relationships = []
             if len(concepts) > 1:
                 relationships = self.extract_relationships(text, concepts)
             elif len(concepts) == 1:
-                logger.info("Only 1 concept extracted; skipping relationship extraction.")
-                
-            # Final output aggregation
+                logger.info("Only 1 concept extracted — skipping relationship extraction.")
+
             kg = KnowledgeGraph(concepts=concepts, relationships=relationships)
             return kg.model_dump()
-            
+
         except Exception as e:
-            logger.error(f"Error during knowledge extraction: {e}")
+            logger.error("Error during knowledge extraction: %s", e)
             raise

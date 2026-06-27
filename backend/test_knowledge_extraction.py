@@ -2,7 +2,7 @@ import json
 import os
 from dotenv import load_dotenv
 
-# Ensure OPENAI_API_KEY is loaded
+# Ensure GOOGLE_API_KEY is loaded
 load_dotenv()
 
 from agents.knowledge_extraction import KnowledgeExtractionAgent
